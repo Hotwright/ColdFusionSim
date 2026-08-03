@@ -81,12 +81,10 @@ void ParticleSystem::handleCollision(uint64_t i, uint64_t j){
     forces[j*3+1] -= fy;
     forces[j*3+2] -= fz;
   }
-  else if (
-    pdAttraction > 0.0 &&
-    parameters[i*2+1] == mass && parameters[j*2+1] == mass
-  ){
-    // attractive force between big (Pd) particles, tapering linearly
-    //  from pdAttraction at contact to zero at the cutoff distance
+  else {
+    // beyond contact: metallic Pd-Pd cohesion and/or electrostatic
+    //  (charge) forces, both tapering linearly to zero at the cutoff
+    //  distance; they stack since they're different physical effects
     double dOuter = rc*attractionRangeMultiplier;
     if (dd < dOuter*dOuter){
       d = std::sqrt(dd);
@@ -94,7 +92,21 @@ void ParticleSystem::handleCollision(uint64_t i, uint64_t j){
       ny = ry / d;
       nz = rz / d;
 
-      mag = pdAttraction*(dOuter-d)/(dOuter-rc);
+      double taper = (dOuter-d)/(dOuter-rc);
+      mag = 0.0;
+
+      if (pdAttraction > 0.0 && parameters[i*2+1] == mass && parameters[j*2+1] == mass){
+        mag += pdAttraction*taper;
+      }
+
+      double qi = charge[i];
+      double qj = charge[j];
+      if (qi != 0.0 && qj != 0.0){
+        // opposite charges attract (positive mag), like charges repel
+        mag += -coulombStrength*qi*qj*taper;
+      }
+
+      if (mag == 0.0){return;}
 
       fx = mag*nx;
       fy = mag*ny;
@@ -355,8 +367,9 @@ void ParticleSystem::addParticle(){
 
   double r = nPdNi%2 == 0 ? radius : radius / radiusRatio;
   double m = nPdNi%2 == 0 ? mass : mass / massRatio;
+  double q = nPdNi%2 == 0 ? pdCharge : niCharge;
 
-  insertParticle(nPdNi,x,y,z,r,m);
+  insertParticle(nPdNi,x,y,z,r,m,q);
 }
 
 void ParticleSystem::setHCount(uint64_t target){
@@ -364,7 +377,7 @@ void ParticleSystem::setHCount(uint64_t target){
     double x = U(generator)*(Lx-2*radius)+radius;
     double y = U(generator)*(Ly-2*radius)+radius;
     double z = U(generator)*(Lz-2*radius)+radius;
-    addParticle(x,y,z,hRadius,hMass);
+    addParticle(x,y,z,hRadius,hMass,hCharge);
     nH++;
   }
   while (nH > target){
@@ -386,16 +399,19 @@ void ParticleSystem::randomise(double propBig){
     if (nSmall == 0 && nBig > 0){
       parameters[i*2] = radius;
       parameters[i*2+1] = mass;
+      charge[i] = pdCharge;
       nBig--;
     }
     else if (nBig > 0 && coin){
       parameters[i*2] = radius;
       parameters[i*2+1] = mass;
+      charge[i] = pdCharge;
       nBig--;
     }
     else if (nSmall > 0){
       parameters[i*2] = radius/radiusRatio;
       parameters[i*2+1] = mass/massRatio;
+      charge[i] = niCharge;
       nSmall--;
     }
 
@@ -409,7 +425,8 @@ void ParticleSystem::addParticle(
   double y,
   double z,
   double r,
-  double m
+  double m,
+  double q
 ){
 
   int i = size();
@@ -430,6 +447,8 @@ void ParticleSystem::addParticle(
   parameters.push_back(r);
   parameters.push_back(m);
 
+  charge.push_back(q);
+
   forces.push_back(0.0);
   forces.push_back(0.0);
   forces.push_back(0.0);
@@ -445,12 +464,14 @@ void ParticleSystem::insertParticle(
   double y,
   double z,
   double r,
-  double m
+  double m,
+  double q
 ){
 
   state.insert(state.begin()+3*idx, {x,y,z});
   lastState.insert(lastState.begin()+3*idx, {x,y,z});
   parameters.insert(parameters.begin()+2*idx, {r,m});
+  charge.insert(charge.begin()+idx, q);
   forces.insert(forces.begin()+3*idx, {0.0,0.0,0.0});
   velocities.insert(velocities.begin()+3*idx, {0.0,0.0,0.0});
 
@@ -490,6 +511,8 @@ void ParticleSystem::removeParticle(uint64_t i){
       parameters.begin()+2*i+2
     );
 
+    charge.erase(charge.begin()+i);
+
     forces.erase(
       forces.begin()+3*i,
       forces.begin()+3*i+3
@@ -502,54 +525,29 @@ void ParticleSystem::removeParticle(uint64_t i){
   }
 }
 
-void ParticleSystem::oneBigOnBottom(){
-  parameters[0] = radius;
-  parameters[1] = mass;
-  floatState[0*4+3] = radius;
-  // leave the trailing proteium (H) block untouched
-  int nPdNi = size()-nH;
-  for (int i = 1; i < nPdNi; i++){
-    parameters[i*2] = radius/radiusRatio;
-    parameters[i*2+1] = mass/massRatio;
-    floatState[i*4+3] = parameters[i*2];
+void ParticleSystem::randomisePositions(){
+  for (int i = 0; i < size(); i++){
+    double r = parameters[i*2];
+    double x = U(generator)*(Lx-2*r)+r;
+    double y = U(generator)*(Ly-2*r)+r;
+    double z = U(generator)*(Lz-2*r)+r;
+
+    state[i*3] = x;
+    state[i*3+1] = y;
+    state[i*3+2] = z;
+
+    lastState[i*3] = x;
+    lastState[i*3+1] = y;
+    lastState[i*3+2] = z;
+
+    velocities[i*3] = 0.0;
+    velocities[i*3+1] = 0.0;
+    velocities[i*3+2] = 0.0;
+
+    floatState[i*4] = x;
+    floatState[i*4+1] = y;
+    floatState[i*4+2] = z;
   }
-
-  state[0] = Lx/2.0;
-  state[1] = 2*radius;
-  state[2] = Lz/2.0;
-
-  double r = 2.0*radius/radiusRatio;
-  int n = std::floor(Lx/r);
-  int j = 0;
-  double y = r+3*radius;
-  for (int i = 1; i < nPdNi; i++){
-    if (j < n){
-      state[i*3] = j*r+radius/2.;
-      state[i*3+1] = y;
-      state[i*3+2] = Lz/2.0;
-      j++;
-    }
-    else{
-      j = 0;
-      y += r*1.1;
-      state[i*3] = j*r+radius/2.;
-      state[i*3+1] = y;
-      state[i*3+2] = Lz/2.0;
-    }
-  }
-
-  for (int i = 0; i < nPdNi; i++){
-    lastState[i*3] = state[i*3];
-    lastState[i*3+1] = state[i*3+1];
-    lastState[i*3+2] = state[i*3+2];
-    floatState[i*4] = state[i*3];
-    floatState[i*4+1] = state[i*3+1];
-    floatState[i*4+2] = state[i*3+2];
-  }
-
-  shakerDisplacement = 0;
-  shakerPeriod = 1.0;
-  shakerAmplitude = 0;
 }
 
 void ParticleSystem::one(){
@@ -562,6 +560,7 @@ void ParticleSystem::one(){
 
   parameters[0] = radius;
   parameters[1] = mass;
+  charge[0] = pdCharge;
   floatState[0*4+3] = radius;
 
   state[0] = Lx/2.0;

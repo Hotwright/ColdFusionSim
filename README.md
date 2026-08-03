@@ -1,4 +1,4 @@
-# Big Nuts Rise
+# Cold Fusion Sim
 
 A demo simulation of granular materials and a shaker, play with all the parrameters live!
 

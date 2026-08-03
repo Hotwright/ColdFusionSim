@@ -39,10 +39,12 @@
 
 const int resX = 1000;
 const int resY = 1000;
-// the 3D scene renders only into this left portion of the window, so it
-//  never draws behind the control column on the right
+// the 3D scene renders only into this region of the window: left of the
+//  control column, and dropped down from the top by simTopMargin
 const int panelWidth = 340;
 const int simWidth = resX-panelWidth;
+const int simTopMargin = 320;
+const int simHeight = resY-simTopMargin;
 
 // empirical atomic radii (picometres), Clementi et al. 1967
 const double HYDROGEN_ATOMIC_RADIUS = 25.0;
@@ -50,6 +52,11 @@ const double NICKEL_ATOMIC_RADIUS = 124.0;
 const double PALLADIUM_ATOMIC_RADIUS = 137.0;
 const double PD_NI_RADIUS_RATIO = PALLADIUM_ATOMIC_RADIUS / NICKEL_ATOMIC_RADIUS;
 const double PD_H_RADIUS_RATIO = PALLADIUM_ATOMIC_RADIUS / HYDROGEN_ATOMIC_RADIUS;
+
+// standard atomic weights (u), IUPAC
+const double NICKEL_ATOMIC_MASS = 58.6934;
+const double PALLADIUM_ATOMIC_MASS = 106.42;
+const double PD_NI_MASS_RATIO = PALLADIUM_ATOMIC_MASS / NICKEL_ATOMIC_MASS;
 
 // the simulation box (world units)
 const double BOX_LX = 0.5;
@@ -101,7 +108,7 @@ int main(){
 
   sf::RenderWindow window(
     sf::VideoMode(resX,resY),
-    "Big Nuts Rise",
+    "Cold Fusion Sim",
     sf::Style::Close|sf::Style::Titlebar,
     contextSettings
   );
@@ -138,37 +145,11 @@ int main(){
 
   Popup popups;
 
-  // aspect ratio matches the narrower viewport the 3D scene actually
-  //  renders into (see simWidth), not the full window
-  Camera3D camera(simWidth,resY,glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0));
+  // aspect ratio matches the viewport the 3D scene actually renders
+  //  into (see simWidth/simHeight), not the full window
+  Camera3D camera(simWidth,simHeight,glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0));
 
   glViewport(0,0,resX,resY);
-
-  // solid backdrop behind the control column; the 3D viewport is
-  //  restricted to simWidth so nothing renders here, but this keeps a
-  //  clean edge and covers the sidebar for any window resize slop
-  GLuint panelShader = glCreateProgram();
-  compileShader(panelShader,buttonVertexShader,buttonFragmentShader);
-
-  float panelVerts[6*2] = {
-    float(simWidth), 0.0f,
-    float(simWidth), float(resY),
-    float(resX), float(resY),
-    float(simWidth), 0.0f,
-    float(resX), float(resY),
-    float(resX), 0.0f
-  };
-
-  GLuint panelVAO, panelVBO;
-  glGenVertexArrays(1,&panelVAO);
-  glGenBuffers(1,&panelVBO);
-  glBindVertexArray(panelVAO);
-  glBindBuffer(GL_ARRAY_BUFFER,panelVBO);
-  glBufferData(GL_ARRAY_BUFFER,sizeof(panelVerts),panelVerts,GL_STATIC_DRAW);
-  glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),0);
-  glBindBuffer(GL_ARRAY_BUFFER,0);
-  glBindVertexArray(0);
 
   // sliders are not beautifully handeled, should really have
   //  a widget hierachy system, but won't bother for this
@@ -195,7 +176,8 @@ int main(){
   restitutionSlider.setProjection(textProj);
 
   Slider massRatioSlider(resX-300.0,resY-64.0*6,128.0,16.0,"Mass Ratio");
-  massRatioSlider.setPosition(0.5);
+  // default to the real Pd:Ni atomic mass ratio (slider maps [0,1] -> [1, 1+maxMassRatio])
+  massRatioSlider.setPosition((PD_NI_MASS_RATIO-1.0)/2.0);
   massRatioSlider.setProjection(textProj);
 
   Slider radiusRatioSlider(resX-300.0,resY-64.0*7,128.0,16.0,"Size Ratio");
@@ -207,17 +189,26 @@ int main(){
   pdAttractionSlider.setPosition(0.0);
   pdAttractionSlider.setProjection(textProj);
 
-  Button oneBigOnBottomButton(resX-300.0,resY-64.0*9,16.0,16.0,"One Big",30);
-  oneBigOnBottomButton.setState(false);
-  oneBigOnBottomButton.setProjection(textProj);
+  Slider proteiumSlider(resX-300.0,resY-64.0*9,128.0,16.0,"Proteium Count");
+  proteiumSlider.setPosition(0.0);
+  proteiumSlider.setProjection(textProj);
 
-  Button newRecording(resX-300.0,resY-65.0*10,16.0,16.0,"Record",30);
+  // buttons live directly under all the sliders above
+  Button newRecording(resX-300.0,resY-64.0*10,16.0,16.0,"Record",30);
   newRecording.setState(false);
   newRecording.setProjection(textProj);
 
-  Slider proteiumSlider(resX-300.0,resY-64.0*11,128.0,16.0,"Proteium Count");
-  proteiumSlider.setPosition(0.0);
-  proteiumSlider.setProjection(textProj);
+  Button randomizeButton(resX-300.0,resY-64.0*11,16.0,16.0,"Randomize",30);
+  randomizeButton.setState(false);
+  randomizeButton.setProjection(textProj);
+
+  std::vector<Slider*> sliders = {
+    &amplitudeSlider, &shakerSlider, &particlesSlider, &proportionBigSlider,
+    &restitutionSlider, &massRatioSlider, &radiusRatioSlider,
+    &pdAttractionSlider, &proteiumSlider
+  };
+  // whichever slider was last clicked/dragged; arrow keys nudge this one
+  Slider * activeSlider = nullptr;
 
   double oldMouseX = 0.0;
   double oldMouseY = 0.0;
@@ -335,26 +326,21 @@ int main(){
       if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left){
         sf::Vector2i pos = sf::Mouse::getPosition(window);
 
-        // horrible sliders, should have hierachy + drawable class
-        bool c = shakerSlider.clicked(pos.x,resY-pos.y);
-        particlesSlider.clicked(pos.x,resY-pos.y);
-        proportionBigSlider.clicked(pos.x,resY-pos.y);
-        restitutionSlider.clicked(pos.x,resY-pos.y);
-        amplitudeSlider.clicked(pos.x,resY-pos.y);
-        massRatioSlider.clicked(pos.x,resY-pos.y);
-        radiusRatioSlider.clicked(pos.x,resY-pos.y);
-        pdAttractionSlider.clicked(pos.x,resY-pos.y);
-        proteiumSlider.clicked(pos.x,resY-pos.y);
+        // whichever slider gets hit becomes the arrow-key target
+        for (Slider * s : sliders){
+          if (s->clicked(pos.x,resY-pos.y)){activeSlider = s;}
+        }
 
         // buttons
-        oneBigOnBottomButton.clicked(pos.x,resY-pos.y);
         newRecording.clicked(pos.x,resY-pos.y);
+        randomizeButton.clicked(pos.x,resY-pos.y);
 
         // cast a ray through the clicked pixel and find the nearest particle it
         //  hits; only meaningful within the 3D viewport, not the control column
-        if (pos.x < simWidth){
+        //  or the top margin, and rebased to the viewport's own coordinates
+        if (pos.x < simWidth && pos.y >= simTopMargin){
           glm::vec3 rayOrigin, rayDir;
-          camera.screenRay(pos.x,pos.y,rayOrigin,rayDir);
+          camera.screenRay(pos.x,pos.y-simTopMargin,rayOrigin,rayDir);
 
           pRender.click(particles,rayOrigin,rayDir);
         }
@@ -365,29 +351,25 @@ int main(){
 
       if (event.type == sf::Event::MouseMoved && sf::Mouse::isButtonPressed(sf::Mouse::Left)){
         sf::Vector2i pos = sf::Mouse::getPosition(window);
-        shakerSlider.drag(pos.x,resY-pos.y);
-        particlesSlider.drag(pos.x,resY-pos.y);
-        proportionBigSlider.drag(pos.x,resY-pos.y);
-        restitutionSlider.drag(pos.x,resY-pos.y);
-        amplitudeSlider.drag(pos.x,resY-pos.y);
-        massRatioSlider.drag(pos.x,resY-pos.y);
-        radiusRatioSlider.drag(pos.x,resY-pos.y);
-        pdAttractionSlider.drag(pos.x,resY-pos.y);
-        proteiumSlider.drag(pos.x,resY-pos.y);
+        for (Slider * s : sliders){
+          s->drag(pos.x,resY-pos.y);
+        }
       }
 
       if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Left){
-        sf::Vector2i pos = sf::Mouse::getPosition(window);
+        for (Slider * s : sliders){
+          s->mouseUp();
+        }
+      }
 
-        shakerSlider.mouseUp();
-        particlesSlider.mouseUp();
-        proportionBigSlider.mouseUp();
-        restitutionSlider.mouseUp();
-        amplitudeSlider.mouseUp();
-        massRatioSlider.mouseUp();
-        radiusRatioSlider.mouseUp();
-        pdAttractionSlider.mouseUp();
-        proteiumSlider.mouseUp();
+      // arrow keys nudge whichever slider was last clicked/dragged
+      if (event.type == sf::Event::KeyPressed && activeSlider != nullptr){
+        if (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Down){
+          activeSlider->setPosition(activeSlider->getPosition()-0.01f);
+        }
+        else if (event.key.code == sf::Keyboard::Right || event.key.code == sf::Keyboard::Up){
+          activeSlider->setPosition(activeSlider->getPosition()+0.01f);
+        }
       }
 
     }
@@ -398,27 +380,9 @@ int main(){
 
     physClock.restart();
 
-    if (oneBigOnBottomButton.getState()){
-
-      if (particles.size()-particles.getHCount() < N){
-        while (particles.size()-particles.getHCount() < N){
-          particles.addParticle();
-        }
-      }
-
-      particles.oneBigOnBottom();
-      pause = true;
-      particlesSlider.setPosition(1.0);
-      amplitudeSlider.setPosition(0.0);
-      shakerSlider.setPosition(1.0);
-      propBig = 1.0f/float(N);
-      proportionBigSlider.setPosition(propBig);
-
-      amplitudeSlider.setPosition(0.46/10.0);
-      shakerSlider.setPosition(1.0);
-      shakerSlider.setSmoothChange(true,60*10,2.0);
-
-      oneBigOnBottomButton.setState(false);
+    if (randomizeButton.getState()){
+      particles.randomisePositions();
+      randomizeButton.setState(false);
     }
 
     // now for some very inelegant slider logic!
@@ -493,16 +457,16 @@ int main(){
 
     glm::mat4 proj = camera.getVP();
 
-    // restrict the 3D scene to the left of the control column entirely,
-    //  rather than relying on the panel backdrop to cover it afterward
-    glViewport(0,0,simWidth,resY);
+    // restrict the 3D scene to the left of the control column, and drop
+    //  it down from the top of the window by simTopMargin
+    glViewport(0,0,simWidth,simHeight);
     glEnable(GL_DEPTH_TEST);
     pRender.setProjection(proj);
     pRender.draw(
       particles,
       frameId,
       simWidth,
-      resY
+      simHeight
     );
     glDisable(GL_DEPTH_TEST);
 
@@ -523,7 +487,7 @@ int main(){
       textRenderer.renderText(
         OD,
         "Recording to file:\n    "+record.fileName(),
-        resX-400.0,resY-64.0*11,
+        resX-400.0,resY-64.0*12,
         0.25f,
         glm::vec3(0.0f,0.0f,0.0f)
       );
@@ -569,55 +533,9 @@ int main(){
     }
 
     // more inelegant slider drawing
-    shakerSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    particlesSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    proportionBigSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    restitutionSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    amplitudeSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    radiusRatioSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    massRatioSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    pdAttractionSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    proteiumSlider.draw(
-      textRenderer,
-      OD
-    );
-
-    oneBigOnBottomButton.draw(
-      textRenderer,
-      OD
-    );
+    for (Slider * s : sliders){
+      s->draw(textRenderer,OD);
+    }
 
     popups.draw(
       textRenderer,
@@ -626,6 +544,11 @@ int main(){
     );
 
     newRecording.draw(
+      textRenderer,
+      OD
+    );
+
+    randomizeButton.draw(
       textRenderer,
       OD
     );

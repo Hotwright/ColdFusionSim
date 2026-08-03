@@ -37,7 +37,10 @@ public:
     shakerPeriod(1.0),shakerAmplitude(radius),shakerTime(0.0),
     Lx(Lx), Ly(Ly), Lz(Lz),
     pdAttraction(0.0),attractionRangeMultiplier(2.5),
-    hRadiusRatio(1.0),hRadius(radius),hMass(mass),nH(0)
+    hRadiusRatio(1.0),hRadius(radius),hMass(mass),nH(0),
+    // formal charges (simulation units, not SI): Pd2+/Ni2+ vs hydride H-,
+    //  so proteium is drawn toward the metal and metal ions repel each other
+    pdCharge(2.0),niCharge(2.0),hCharge(-1.0),coulombStrength(3.0)
   {
 
     floatState = new float [capacity*4];
@@ -67,8 +70,9 @@ public:
 
       double r = i%2 == 0 ? radius : radius / radiusRatio;
       double m = i%2 == 0 ? mass : mass / massRatio;
+      double q = i%2 == 0 ? pdCharge : niCharge;
 
-      addParticle(x,y,z,r,m);
+      addParticle(x,y,z,r,m,q);
       uint64_t c = hash(i);
       if (cells[c] == NULL_INDEX){
         cells[c] = i;
@@ -173,8 +177,11 @@ public:
 
   // scenarios
 
-  void oneBigOnBottom();
   void one();
+
+  // scatters every particle to a random position in the box, zeroing
+  //  velocity; species/radius/mass are untouched
+  void randomisePositions();
 
   ~ParticleSystem(){
     free(floatState);
@@ -186,6 +193,7 @@ private:
   std::vector<double> lastState;
 
   std::vector<double> parameters;
+  std::vector<double> charge;
 
   std::vector<double> forces;
   std::vector<double> velocities;
@@ -230,13 +238,18 @@ private:
   double hMass;
   uint64_t nH;
 
+  double pdCharge;
+  double niCharge;
+  double hCharge;
+  double coulombStrength;
+
   float * floatState;
 
   // appends at the true end of the arrays (used for H particles, which
   //  are always kept as the trailing block)
-  void addParticle(double x, double y, double z, double r, double m);
+  void addParticle(double x, double y, double z, double r, double m, double q);
   // inserts a Pd/Ni particle just before the trailing H block
-  void insertParticle(uint64_t idx, double x, double y, double z, double r, double m);
+  void insertParticle(uint64_t idx, double x, double y, double z, double r, double m, double q);
   void removeParticle(uint64_t i);
 
   // Cell Linked List Collisions detection
