@@ -1,10 +1,11 @@
 #include <ParticleSystem/trajectory.h>
 
 void Trajectory::takeReading(ParticleSystem & p){
-    std::vector<State> s(p.size(),State(0.0,0.0,0.0));
+    std::vector<State> s(p.size(),State(0.0,0.0,0.0,0.0));
     for (int i = 0; i < p.size(); i++){
         s[i].x = p.state[i*3];
         s[i].y = p.state[i*3+1];
+        s[i].z = p.state[i*3+2];
         s[i].radius = p.parameters[i*2];
         size += 1;
     }
@@ -52,6 +53,7 @@ void Trajectory::threadedSave(std::vector<std::vector<State>> trajectory){
             for (int i = 0; i < trajectory[t].size(); i++){
                 out << trajectory[t][i].x << ", "
                     << trajectory[t][i].y << ", "
+                    << trajectory[t][i].z << ", "
                     << trajectory[t][i].radius
                     << "\n";
             }

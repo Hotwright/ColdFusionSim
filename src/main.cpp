@@ -16,6 +16,7 @@
 #include <SFML/OpenGL.hpp>
 
 #include <orthoCam.h>
+#include <camera3D.h>
 
 #include <glUtils.h>
 #include <utils.h>
@@ -38,6 +39,22 @@
 
 const int resX = 1000;
 const int resY = 1000;
+// the 3D scene renders only into this left portion of the window, so it
+//  never draws behind the control column on the right
+const int panelWidth = 340;
+const int simWidth = resX-panelWidth;
+
+// empirical atomic radii (picometres), Clementi et al. 1967
+const double HYDROGEN_ATOMIC_RADIUS = 25.0;
+const double NICKEL_ATOMIC_RADIUS = 124.0;
+const double PALLADIUM_ATOMIC_RADIUS = 137.0;
+const double PD_NI_RADIUS_RATIO = PALLADIUM_ATOMIC_RADIUS / NICKEL_ATOMIC_RADIUS;
+const double PD_H_RADIUS_RATIO = PALLADIUM_ATOMIC_RADIUS / HYDROGEN_ATOMIC_RADIUS;
+
+// the simulation box (world units)
+const double BOX_LX = 0.5;
+const double BOX_LY = 1.0;
+const double BOX_LZ = 0.5;
 
 const int subSamples = 60;
 const float dt = (1.0 / 60.0) / subSamples;
@@ -45,6 +62,10 @@ const float dt = (1.0 / 60.0) / subSamples;
 const int saveFrequency = 1;
 
 const int N = 1024;
+// proteium (H) particles are added on top of N (the Pd/Ni cap), up to
+//  this many per Pd particle, so storage must be reserved for the worst case
+const double MAX_H_RATIO = 10.0;
+const uint64_t CAPACITY = N + uint64_t(N*MAX_H_RATIO);
 // motion parameters
 
 // for smoothing delta numbers
@@ -93,22 +114,19 @@ int main(){
   uint8_t debug = 0;
 
   // the core simulation
-  ParticleSystem particles(N,dt);
+  ParticleSystem particles(N,CAPACITY,dt,0.25,BOX_LX,BOX_LY,BOX_LZ);
+  particles.setHRadiusRatio(PD_H_RADIUS_RATIO);
   // handles rendering - separation of concerns
-  ParticleSystemRenderer pRender(N);
+  ParticleSystemRenderer pRender(CAPACITY);
 
   sf::Clock clock;
   sf::Clock physClock, renderClock;
 
-  glm::mat4 defaultProj = glm::ortho(0.0,double(resX),0.0,double(resY),0.1,100.0);
   glm::mat4 textProj = glm::ortho(0.0,double(resX),0.0,double(resY));
 
-  // for rendering particles using gl_point instances
-  glEnable(GL_PROGRAM_POINT_SIZE);
-  glEnable(GL_POINT_SPRITE);
   glEnable( GL_BLEND );
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glDisable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LEQUAL);
 
   // for freetype rendering
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -120,9 +138,37 @@ int main(){
 
   Popup popups;
 
-  OrthoCam camera(resX,resY,glm::vec2(0.0,0.0));
+  // aspect ratio matches the narrower viewport the 3D scene actually
+  //  renders into (see simWidth), not the full window
+  Camera3D camera(simWidth,resY,glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0));
 
   glViewport(0,0,resX,resY);
+
+  // solid backdrop behind the control column; the 3D viewport is
+  //  restricted to simWidth so nothing renders here, but this keeps a
+  //  clean edge and covers the sidebar for any window resize slop
+  GLuint panelShader = glCreateProgram();
+  compileShader(panelShader,buttonVertexShader,buttonFragmentShader);
+
+  float panelVerts[6*2] = {
+    float(simWidth), 0.0f,
+    float(simWidth), float(resY),
+    float(resX), float(resY),
+    float(simWidth), 0.0f,
+    float(resX), float(resY),
+    float(resX), 0.0f
+  };
+
+  GLuint panelVAO, panelVBO;
+  glGenVertexArrays(1,&panelVAO);
+  glGenBuffers(1,&panelVBO);
+  glBindVertexArray(panelVAO);
+  glBindBuffer(GL_ARRAY_BUFFER,panelVBO);
+  glBufferData(GL_ARRAY_BUFFER,sizeof(panelVerts),panelVerts,GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),0);
+  glBindBuffer(GL_ARRAY_BUFFER,0);
+  glBindVertexArray(0);
 
   // sliders are not beautifully handeled, should really have
   //  a widget hierachy system, but won't bother for this
@@ -140,7 +186,7 @@ int main(){
   particlesSlider.setPosition(0.5);
   particlesSlider.setProjection(textProj);
 
-  Slider proportionBigSlider(resX-300.0,resY-64.0*4,128.0,16.0,"Proportion Big");
+  Slider proportionBigSlider(resX-300.0,resY-64.0*4,128.0,16.0,"Pd:Ni Ratio");
   proportionBigSlider.setPosition(0.5);
   proportionBigSlider.setProjection(textProj);
 
@@ -153,8 +199,13 @@ int main(){
   massRatioSlider.setProjection(textProj);
 
   Slider radiusRatioSlider(resX-300.0,resY-64.0*7,128.0,16.0,"Size Ratio");
-  radiusRatioSlider.setPosition(0.5);
+  // default to the real Pd:Ni atomic radius ratio (slider maps [0,1] -> [1, 1+maxRadiusRatio])
+  radiusRatioSlider.setPosition((PD_NI_RADIUS_RATIO-1.0)/4.0);
   radiusRatioSlider.setProjection(textProj);
+
+  Slider pdAttractionSlider(resX-300.0,resY-64.0*8,128.0,16.0,"Pd Attraction");
+  pdAttractionSlider.setPosition(0.0);
+  pdAttractionSlider.setProjection(textProj);
 
   Button oneBigOnBottomButton(resX-300.0,resY-64.0*9,16.0,16.0,"One Big",30);
   oneBigOnBottomButton.setState(false);
@@ -164,11 +215,19 @@ int main(){
   newRecording.setState(false);
   newRecording.setProjection(textProj);
 
+  Slider proteiumSlider(resX-300.0,resY-64.0*11,128.0,16.0,"Proteium Count");
+  proteiumSlider.setPosition(0.0);
+  proteiumSlider.setProjection(textProj);
+
   double oldMouseX = 0.0;
   double oldMouseY = 0.0;
 
   double mouseX = resX/2.0;
   double mouseY = resY/2.0;
+
+  double oldOrbitX = 0.0;
+  double oldOrbitY = 0.0;
+  bool orbiting = false;
 
   bool moving = false;
 
@@ -179,6 +238,7 @@ int main(){
   double maxAmplitude = 10.0; // measured in particle radius units!
   double maxMassRatio = 2.0;
   double maxRadiusRatio = 4.0;
+  double maxPdAttraction = 10.0;
 
   bool isRecording = false;
   Trajectory record;
@@ -246,16 +306,30 @@ int main(){
         mouseY = event.mouseWheelScroll.y;
         double z = event.mouseWheelScroll.delta;
 
-        camera.incrementZoom(z);
+        camera.zoom(z);
       }
 
+      // middle click resets the view
       if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Middle){
-        mouseX = event.mouseButton.x;
-        mouseY = event.mouseButton.y;
+        camera.reset(glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0),1.6f,45.0f,20.0f);
+      }
 
-        glm::vec4 worldPos = camera.screenToWorld(mouseX,mouseY);
+      // right-drag orbits the camera around the box
+      if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Right){
+        oldOrbitX = event.mouseButton.x;
+        oldOrbitY = event.mouseButton.y;
+        orbiting = true;
+      }
 
-        camera.setPosition(worldPos.x,worldPos.y);
+      if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Right){
+        orbiting = false;
+      }
+
+      if (event.type == sf::Event::MouseMoved && orbiting){
+        sf::Vector2i pos = sf::Mouse::getPosition(window);
+        camera.orbit(float(pos.x-oldOrbitX)*0.3f, float(oldOrbitY-pos.y)*0.3f);
+        oldOrbitX = pos.x;
+        oldOrbitY = pos.y;
       }
 
       if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left){
@@ -269,15 +343,21 @@ int main(){
         amplitudeSlider.clicked(pos.x,resY-pos.y);
         massRatioSlider.clicked(pos.x,resY-pos.y);
         radiusRatioSlider.clicked(pos.x,resY-pos.y);
+        pdAttractionSlider.clicked(pos.x,resY-pos.y);
+        proteiumSlider.clicked(pos.x,resY-pos.y);
 
         // buttons
         oneBigOnBottomButton.clicked(pos.x,resY-pos.y);
         newRecording.clicked(pos.x,resY-pos.y);
 
-        // multiply by inverse of current projection
-        glm::vec4 worldPos = camera.screenToWorld(pos.x,pos.y);
+        // cast a ray through the clicked pixel and find the nearest particle it
+        //  hits; only meaningful within the 3D viewport, not the control column
+        if (pos.x < simWidth){
+          glm::vec3 rayOrigin, rayDir;
+          camera.screenRay(pos.x,pos.y,rayOrigin,rayDir);
 
-        pRender.click(particles,worldPos.x,worldPos.y);
+          pRender.click(particles,rayOrigin,rayDir);
+        }
 
         oldMouseX = pos.x;
         oldMouseY = pos.y;
@@ -292,6 +372,8 @@ int main(){
         amplitudeSlider.drag(pos.x,resY-pos.y);
         massRatioSlider.drag(pos.x,resY-pos.y);
         radiusRatioSlider.drag(pos.x,resY-pos.y);
+        pdAttractionSlider.drag(pos.x,resY-pos.y);
+        proteiumSlider.drag(pos.x,resY-pos.y);
       }
 
       if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Left){
@@ -304,6 +386,8 @@ int main(){
         amplitudeSlider.mouseUp();
         massRatioSlider.mouseUp();
         radiusRatioSlider.mouseUp();
+        pdAttractionSlider.mouseUp();
+        proteiumSlider.mouseUp();
       }
 
     }
@@ -316,8 +400,8 @@ int main(){
 
     if (oneBigOnBottomButton.getState()){
 
-      if (particles.size() < N){
-        while (particles.size() < N){
+      if (particles.size()-particles.getHCount() < N){
+        while (particles.size()-particles.getHCount() < N){
           particles.addParticle();
         }
       }
@@ -340,13 +424,14 @@ int main(){
     // now for some very inelegant slider logic!
     int n = std::floor(particlesSlider.getPosition()*float(N));
     particlesSlider.setLabel("Particles: "+fixedLengthNumber(n,4));
-    if (n < particles.size()){
-      while (n < particles.size()){
-        particles.removeParticle();
+    int nPdNi = particles.size()-particles.getHCount();
+    if (n < nPdNi){
+      while (n < particles.size()-particles.getHCount()){
+        particles.removePdNiParticle();
       }
     }
-    else if (n > particles.size()){
-      int i = particles.size()-1;
+    else if (n > nPdNi){
+      int i = nPdNi-1;
       while (i < n){
         particles.addParticle();
         i++;
@@ -354,12 +439,21 @@ int main(){
     }
 
     double val = proportionBigSlider.getPosition();
-    proportionBigSlider.setLabel("Prop. Big: "+fixedLengthNumber(val,4));
+    proportionBigSlider.setLabel("Pd:Ni Ratio: "+fixedLengthNumber(val,4)+" Pd");
 
     if (val != propBig){
       particles.randomise(val);
       propBig = val;
     }
+
+    // proteium is added on top of the Pd/Ni population: value is the
+    //  ratio of H particles to Pd particles (0 to MAX_H_RATIO, 1 = 1:1)
+    val = proteiumSlider.getPosition()*MAX_H_RATIO;
+    proteiumSlider.setLabel("Proteium Ratio: "+fixedLengthNumber(val,4)+" : 1 Pd");
+
+    int currentPdNi = particles.size()-particles.getHCount();
+    int nPd = std::floor(propBig*currentPdNi);
+    particles.setHCount(uint64_t(std::round(val*nPd)));
 
     val = 1.0+massRatioSlider.getPosition()*maxMassRatio;
     particles.setMassRatio(val);
@@ -368,6 +462,10 @@ int main(){
     val = 1.0+radiusRatioSlider.getPosition()*maxRadiusRatio;
     particles.setRadiusRatio(val);
     radiusRatioSlider.setLabel("Size Ratio: "+fixedLengthNumber(val,4));
+
+    val = pdAttractionSlider.getPosition()*maxPdAttraction;
+    particles.setPdAttraction(val);
+    pdAttractionSlider.setLabel("Pd Attraction: "+fixedLengthNumber(val,4));
 
     val = std::max(0.005,double(shakerSlider.getPosition())*shakerMaxPeriod);
     particles.setShakerPeriod(val);
@@ -395,14 +493,21 @@ int main(){
 
     glm::mat4 proj = camera.getVP();
 
+    // restrict the 3D scene to the left of the control column entirely,
+    //  rather than relying on the panel backdrop to cover it afterward
+    glViewport(0,0,simWidth,resY);
+    glEnable(GL_DEPTH_TEST);
     pRender.setProjection(proj);
     pRender.draw(
       particles,
       frameId,
-      camera.getZoomLevel(),
-      resX,
+      simWidth,
       resY
     );
+    glDisable(GL_DEPTH_TEST);
+
+    // UI overlay below is 2D screen-space, full window, and always on top
+    glViewport(0,0,resX,resY);
 
     if (newRecording.getState()){
       record.newFile();
@@ -440,8 +545,7 @@ int main(){
 
       sf::Vector2i mouse = sf::Mouse::getPosition(window);
 
-      float cameraX = camera.getPosition().x;
-      float cameraY = camera.getPosition().y;
+      glm::vec3 eye = camera.getEye();
 
       debugText << "Particles: " << N <<
         "\n" <<
@@ -452,7 +556,7 @@ int main(){
         "\n" <<
         "Mouse (" << fixedLengthNumber(mouse.x,4) << "," << fixedLengthNumber(mouse.y,4) << ")" <<
         "\n" <<
-        "Camera [world] (" << fixedLengthNumber(cameraX,4) << ", " << fixedLengthNumber(cameraY,4) << ")" <<
+        "Camera eye (" << fixedLengthNumber(eye.x,4) << ", " << fixedLengthNumber(eye.y,4) << ", " << fixedLengthNumber(eye.z,4) << ")" <<
         "\n" <<
         "Order: " << fixedLengthNumber(particles.orderParameter(),6) << "\n";
       textRenderer.renderText(
@@ -496,6 +600,16 @@ int main(){
     );
 
     massRatioSlider.draw(
+      textRenderer,
+      OD
+    );
+
+    pdAttractionSlider.draw(
+      textRenderer,
+      OD
+    );
+
+    proteiumSlider.draw(
       textRenderer,
       OD
     );

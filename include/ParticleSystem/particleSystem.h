@@ -23,46 +23,52 @@ public:
 
   ParticleSystem(
     uint64_t N,
+    uint64_t capacity,
     double dt = 1.0/300.0,
     double density = 0.25,
-    double Lx = 0.5, double Ly = 1.0,
+    double Lx = 0.5, double Ly = 1.0, double Lz = 0.5,
     uint64_t seed = clock()
   )
-  : nParticles(N), radius(std::sqrt(density/(N*M_PI))),speed(0),drag(0),
-    rotationalDrag(.01),mass(1.0), momentOfInertia(0.01),
-    rotationalDiffusion(0.01),dt(dt),collisionTime(10*dt),
+  // radius chosen so N spheres of this radius occupy `density` of the box volume.
+  //  N is the Pd/Ni cap (matches the Particles slider); capacity is the total
+  //  storage reserved, since proteium (H) particles are added on top of N.
+  : nParticles(N), maxCapacity(capacity), radius(std::cbrt(3.0*density*Lx*Ly*Lz/(4.0*M_PI*N))),drag(0),
+    mass(1.0),dt(dt),collisionTime(10*dt),
     shakerPeriod(1.0),shakerAmplitude(radius),shakerTime(0.0),
-    Lx(Lx), Ly(Ly)
+    Lx(Lx), Ly(Ly), Lz(Lz),
+    pdAttraction(0.0),attractionRangeMultiplier(2.5),
+    hRadiusRatio(1.0),hRadius(radius),hMass(mass),nH(0)
   {
 
-    floatState = new float [N*4];
+    floatState = new float [capacity*4];
 
     generator.seed(seed);
     Nc = std::ceil(1.0/(4.0*radius));
     deltax = Lx / Nc;
     deltay = Ly / Nc;
+    deltaz = Lz / Nc;
 
     shakerDisplacement = shakerAmplitude/2.0;
     massRatio = 1.0;
     radiusRatio = 2.0;
 
-    for (int c = 0; c < Nc*Nc; c++){
+    for (int c = 0; c < Nc*Nc*Nc; c++){
       cells.push_back(NULL_INDEX);
     }
 
-    for (int i = 0; i < N; i++){
+    for (int i = 0; i < capacity; i++){
       list.push_back(NULL_INDEX);
     }
 
     for (int i = 0; i < N; i++){
       double x = U(generator)*(Lx-2*radius)+radius;
       double y = U(generator)*(Ly-2*radius)+radius;
-      double theta = U(generator)*2.0*3.14;
+      double z = U(generator)*(Lz-2*radius)+radius;
 
       double r = i%2 == 0 ? radius : radius / radiusRatio;
       double m = i%2 == 0 ? mass : mass / massRatio;
 
-      addParticle(x,y,theta,r,m);
+      addParticle(x,y,z,r,m);
       uint64_t c = hash(i);
       if (cells[c] == NULL_INDEX){
         cells[c] = i;
@@ -75,11 +81,14 @@ public:
     setCoeffientOfRestitution(0.95);
   }
 
-  void applyForce(double fx, double fy);
+  void applyForce(double fx, double fy, double fz);
 
   void step();
 
+  // grows/shrinks the Pd/Ni population, capped at N; inserts/removes
+  //  before the trailing proteium (H) block so H particles are untouched
   void addParticle();
+  void removePdNiParticle(){removeParticle(size()-1-nH);}
 
   void removeParticle(){removeParticle(size()-1);}
 
@@ -108,7 +117,24 @@ public:
     if (radiusRatio != rr){radiusRatio = rr; randomise(0.5);}
   }
 
-  void changeRatio();
+  // attractive force between big (Pd) particles, active from contact
+  //  out to attractionRangeMultiplier times the contact distance
+  void setPdAttraction(double a){pdAttraction = a;}
+  double getPdAttraction(){return pdAttraction;}
+
+  // fixes the proteium (H) particle size, given as the ratio of the
+  //  Pd (base) radius to the H radius; mass scales with volume so H
+  //  particles stay light, matching hydrogen's low atomic mass
+  void setHRadiusRatio(double r){
+    hRadiusRatio = r;
+    hRadius = radius / hRadiusRatio;
+    hMass = mass * (hRadius/radius) * (hRadius/radius) * (hRadius/radius);
+  }
+
+  // adds/removes proteium (H) particles, on top of the Pd/Ni population,
+  //  to reach the target count; no-op if already there
+  void setHCount(uint64_t target);
+  uint64_t getHCount(){return nH;}
 
   void setShakerAmplitude(double a){
     if (shakerAmplitude != a*radius){
@@ -141,6 +167,9 @@ public:
 
   double getshakerPeriod(){return shakerPeriod;}
   double getShakerAmplitude(){return shakerAmplitude/radius;}
+  double getLx(){return Lx;}
+  double getLy(){return Ly;}
+  double getLz(){return Lz;}
 
   // scenarios
 
@@ -155,7 +184,6 @@ private:
 
   std::vector<double> state;
   std::vector<double> lastState;
-  std::vector<double> noise;
 
   std::vector<double> parameters;
 
@@ -167,12 +195,15 @@ private:
 
   double Lx;
   double Ly;
+  double Lz;
 
   uint64_t Nc;
   double deltax;
   double deltay;
+  double deltaz;
 
   uint64_t nParticles;
+  uint64_t maxCapacity;
 
   double coefficientOfRestitution;
   double collisionTime;
@@ -180,24 +211,9 @@ private:
   double massRatio;
   double radiusRatio;
 
-  double dampingSS; // small-small
-  double dampingBB; // big-big
-  double dampingSB;
-
-  double restorationSS;
-  double restorationBB;
-  double restorationSB;
-
-  double alpha;
-  double beta;
-
-  double rotationalDiffusion;
-  double speed;
   double radius;
   double drag;
-  double rotationalDrag;
   double mass;
-  double momentOfInertia;
   double dt;
   double dtdt;
 
@@ -206,9 +222,21 @@ private:
   double shakerAmplitude;
   double shakerTime;
 
+  double pdAttraction;
+  double attractionRangeMultiplier;
+
+  double hRadiusRatio;
+  double hRadius;
+  double hMass;
+  uint64_t nH;
+
   float * floatState;
 
-  void addParticle(double x, double y, double theta, double r, double m);
+  // appends at the true end of the arrays (used for H particles, which
+  //  are always kept as the trailing block)
+  void addParticle(double x, double y, double z, double r, double m);
+  // inserts a Pd/Ni particle just before the trailing H block
+  void insertParticle(uint64_t idx, double x, double y, double z, double r, double m);
   void removeParticle(uint64_t i);
 
   // Cell Linked List Collisions detection
@@ -217,23 +245,23 @@ private:
   void populateLists();
   void handleCollision(uint64_t i, uint64_t j);
   void cellCollisions(
-    uint64_t a1,
-    uint64_t b1,
-    uint64_t a2,
-    uint64_t b2
+    int64_t a1, int64_t b1, int64_t c1,
+    int64_t a2, int64_t b2, int64_t c2
   );
 
-  uint64_t hash(float x, float y){
-    return uint64_t(floor(x/deltax))*Nc + uint64_t(floor(y/deltay));
+  uint64_t hash(float x, float y, float z){
+    return uint64_t(floor(x/deltax))*Nc*Nc + uint64_t(floor(y/deltay))*Nc + uint64_t(floor(z/deltaz));
   }
 
   uint64_t hash(uint64_t particle){
-    uint64_t h = uint64_t(floor(state[particle*3]/deltax))*Nc + uint64_t(floor(state[particle*3+1]/deltay));
+    uint64_t h = uint64_t(floor(state[particle*3]/deltax))*Nc*Nc
+      + uint64_t(floor(state[particle*3+1]/deltay))*Nc
+      + uint64_t(floor(state[particle*3+2]/deltaz));
     // a particle outside the box would normally crash the program
     //  (segfault), if this happens there is no logic to get it back in currently
     //  these cases happen due to numerical instability, so a smaller time step
     //  will help! - pretty rare with defaults
-    if (h < 0 || h > Nc*Nc){return 0;}
+    if (h < 0 || h > Nc*Nc*Nc){return 0;}
     return h;
   }
 

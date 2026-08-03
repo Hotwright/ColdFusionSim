@@ -9,11 +9,12 @@
 #include <thread>
 
 struct State {
-  State (double x, double y, double r)
-  : x(x), y(y), radius(r)
+  State (double x, double y, double z, double r)
+  : x(x), y(y), z(z), radius(r)
   {}
   double x;
   double y;
+  double z;
   double radius;
 };
 
