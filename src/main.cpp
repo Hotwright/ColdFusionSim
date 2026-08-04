@@ -68,7 +68,11 @@ const float dt = (1.0 / 60.0) / subSamples;
 
 const int saveFrequency = 1;
 
-const int N = 1024;
+// N is the ceiling the Particles slider can reach; the sim actually
+//  starts at N_INITIAL, since 1,000,000 real-time collision pairs is far
+//  more than this CPU-side physics can hold 60fps at
+const int N = 1000000;
+const int N_INITIAL = 1024;
 // proteium (H) particles are added on top of N (the Pd/Ni cap), up to
 //  this many per Pd particle, so storage must be reserved for the worst case
 const double MAX_H_RATIO = 10.0;
@@ -121,8 +125,11 @@ int main(){
   uint8_t debug = 0;
 
   // the core simulation
-  ParticleSystem particles(N,CAPACITY,dt,0.25,BOX_LX,BOX_LY,BOX_LZ);
+  ParticleSystem particles(N,CAPACITY,N_INITIAL,dt,0.25,BOX_LX,BOX_LY,BOX_LZ);
   particles.setHRadiusRatio(PD_H_RADIUS_RATIO);
+  // the constructor alternates Pd/Ni 50/50; apply the real starting ratio
+  //  immediately rather than waiting for the slider to register a change
+  particles.randomise(0.99);
   // handles rendering - separation of concerns
   ParticleSystemRenderer pRender(CAPACITY);
 
@@ -164,11 +171,12 @@ int main(){
   shakerSlider.setProjection(textProj);
 
   Slider particlesSlider(resX-300.0,resY-64.0*3,128.0,16.0,"Particles");
-  particlesSlider.setPosition(0.5);
+  // log-scale slider (see below): solve position so N^position = N_INITIAL
+  particlesSlider.setPosition(std::log(float(N_INITIAL))/std::log(float(N)));
   particlesSlider.setProjection(textProj);
 
   Slider proportionBigSlider(resX-300.0,resY-64.0*4,128.0,16.0,"Pd:Ni Ratio");
-  proportionBigSlider.setPosition(0.5);
+  proportionBigSlider.setPosition(0.99);
   proportionBigSlider.setProjection(textProj);
 
   Slider restitutionSlider(resX-300.0,resY-64.0*5,128.0,16.0,"Coef. Restitution");
@@ -220,12 +228,17 @@ int main(){
   double oldOrbitY = 0.0;
   bool orbiting = false;
 
+  double oldPanX = 0.0;
+  double oldPanY = 0.0;
+  bool panning = false;
+  bool panned = false;
+
   bool moving = false;
 
   bool pause = false;
 
   double shakerMaxPeriod = 1.0;
-  double propBig = 0.5;
+  double propBig = 0.99;
   double maxAmplitude = 10.0; // measured in particle radius units!
   double maxMassRatio = 2.0;
   double maxRadiusRatio = 4.0;
@@ -245,7 +258,7 @@ int main(){
       }
 
       if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::O){
-        particlesSlider.setPosition(1.0/float(N));
+        particlesSlider.setPosition(0.0); // log scale: position 0 -> 1 particle
         particles.one();
         pause = true;
       }
@@ -300,12 +313,35 @@ int main(){
         camera.zoom(z);
       }
 
-      // middle click resets the view
+      // middle-drag pans the view (so scroll-zoom can focus on a
+      //  different area); a plain middle click with no drag resets the view
       if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Middle){
-        camera.reset(glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0),1.6f,45.0f,20.0f);
+        oldPanX = event.mouseButton.x;
+        oldPanY = event.mouseButton.y;
+        panning = true;
+        panned = false;
       }
 
-      // right-drag orbits the camera around the box
+      if (event.type == sf::Event::MouseButtonReleased && event.mouseButton.button == sf::Mouse::Middle){
+        if (!panned){
+          camera.reset(glm::vec3(BOX_LX/2.0,BOX_LY/2.0,BOX_LZ/2.0),1.6f,45.0f,20.0f);
+        }
+        panning = false;
+      }
+
+      if (event.type == sf::Event::MouseMoved && panning){
+        sf::Vector2i pos = sf::Mouse::getPosition(window);
+        float dx = float(pos.x-oldPanX);
+        float dy = float(pos.y-oldPanY);
+        if (dx != 0.0f || dy != 0.0f){
+          camera.pan(dx,dy);
+          panned = true;
+        }
+        oldPanX = pos.x;
+        oldPanY = pos.y;
+      }
+
+      // right-drag orbits the camera around the current target
       if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Right){
         oldOrbitX = event.mouseButton.x;
         oldOrbitY = event.mouseButton.y;
@@ -386,8 +422,10 @@ int main(){
     }
 
     // now for some very inelegant slider logic!
-    int n = std::floor(particlesSlider.getPosition()*float(N));
-    particlesSlider.setLabel("Particles: "+fixedLengthNumber(n,4));
+    // log scale (position 0 -> 1 particle, position 1 -> N): a linear
+    //  slider would be unusable across a range spanning ~1000x
+    int n = std::round(std::pow(float(N),particlesSlider.getPosition()));
+    particlesSlider.setLabel("Particles: "+fixedLengthNumber(n,7));
     int nPdNi = particles.size()-particles.getHCount();
     if (n < nPdNi){
       while (n < particles.size()-particles.getHCount()){

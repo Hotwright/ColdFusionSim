@@ -17,8 +17,8 @@ Uses C++ with SFML and OpenGL
 | Toggle Button| Click Button |
 | Track particle | Click Particle|
 
-![](https://github.com/Jerboa-app/BigNutsRise/blob/main/resources/demo1.gif)
-![](https://github.com/Jerboa-app/BigNutsRise/blob/main/resources/demo3.gif)
+![](https://github.com/Hotwright/ColdFusionSim/blob/main/resources/demo1.gif)
+![](https://github.com/Hotwright/ColdFusionSim/blob/main/resources/demo3.gif)
 
 ### Building
 

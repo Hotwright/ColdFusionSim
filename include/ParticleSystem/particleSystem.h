@@ -24,15 +24,18 @@ public:
   ParticleSystem(
     uint64_t N,
     uint64_t capacity,
+    uint64_t sizingCount,
     double dt = 1.0/300.0,
     double density = 0.25,
     double Lx = 0.5, double Ly = 1.0, double Lz = 0.5,
     uint64_t seed = clock()
   )
-  // radius chosen so N spheres of this radius occupy `density` of the box volume.
-  //  N is the Pd/Ni cap (matches the Particles slider); capacity is the total
-  //  storage reserved, since proteium (H) particles are added on top of N.
-  : nParticles(N), maxCapacity(capacity), radius(std::cbrt(3.0*density*Lx*Ly*Lz/(4.0*M_PI*N))),drag(0),
+  // radius chosen so sizingCount spheres of this radius occupy `density` of
+  //  the box volume; N is the Pd/Ni cap (the Particles slider's ceiling,
+  //  which can be far above what the box was actually sized to look right
+  //  at) and capacity is the total storage reserved, since proteium (H)
+  //  particles are added on top of N.
+  : nParticles(N), maxCapacity(capacity), radius(std::cbrt(3.0*density*Lx*Ly*Lz/(4.0*M_PI*sizingCount))),drag(0),
     mass(1.0),dt(dt),collisionTime(10*dt),
     shakerPeriod(1.0),shakerAmplitude(radius),shakerTime(0.0),
     Lx(Lx), Ly(Ly), Lz(Lz),
@@ -40,7 +43,14 @@ public:
     hRadiusRatio(1.0),hRadius(radius),hMass(mass),nH(0),
     // formal charges (simulation units, not SI): Pd2+/Ni2+ vs hydride H-,
     //  so proteium is drawn toward the metal and metal ions repel each other
-    pdCharge(2.0),niCharge(2.0),hCharge(-1.0),coulombStrength(3.0)
+    pdCharge(2.0),niCharge(2.0),hCharge(-1.0),coulombStrength(3.0),
+    // Pd-H alpha/beta hydride behaviour: dilute H keeps the small alpha
+    //  lattice; loading past ~60% swells a Pd particle toward the real
+    //  ~3.5% larger beta lattice, unloading below ~30% shrinks it back,
+    //  with a gap between so it doesn't just track loading reversibly
+    betaExpansion(0.035),hLoadingSaturation(3.0),
+    loadingThresholdUp(0.6),loadingThresholdDown(0.3),
+    loadingDecay(0.999),phaseRelaxationRate(0.001)
   {
 
     floatState = new float [capacity*4];
@@ -195,6 +205,13 @@ private:
   std::vector<double> parameters;
   std::vector<double> charge;
 
+  // Pd hydride loading state: hLoading is a smoothed count of nearby H
+  //  particles, loadingAccumulator collects this step's raw count before
+  //  it's folded in, betaFraction is the resulting alpha(0)/beta(1) phase
+  std::vector<double> hLoading;
+  std::vector<double> loadingAccumulator;
+  std::vector<double> betaFraction;
+
   std::vector<double> forces;
   std::vector<double> velocities;
 
@@ -243,6 +260,13 @@ private:
   double hCharge;
   double coulombStrength;
 
+  double betaExpansion;
+  double hLoadingSaturation;
+  double loadingThresholdUp;
+  double loadingThresholdDown;
+  double loadingDecay;
+  double phaseRelaxationRate;
+
   float * floatState;
 
   // appends at the true end of the arrays (used for H particles, which
@@ -250,6 +274,9 @@ private:
   void addParticle(double x, double y, double z, double r, double m, double q);
   // inserts a Pd/Ni particle just before the trailing H block
   void insertParticle(uint64_t idx, double x, double y, double z, double r, double m, double q);
+  // records that particle a and b are within hydriding range, crediting
+  //  whichever of the pair is Pd (a no-op unless one is Pd and the other H)
+  void accumulateLoading(uint64_t a, uint64_t b);
   void removeParticle(uint64_t i);
 
   // Cell Linked List Collisions detection

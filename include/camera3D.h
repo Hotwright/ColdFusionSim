@@ -47,6 +47,17 @@ public:
 
   void setTarget(glm::vec3 t){target = t; update();}
 
+  // slides the orbit target across the view plane (right/up in camera
+  //  space), so zooming in afterward focuses on wherever was panned to;
+  //  scaled by distance so a drag feels the same size on screen at any zoom
+  void pan(float dx, float dy){
+    glm::vec3 right(view[0][0],view[1][0],view[2][0]);
+    glm::vec3 up(view[0][1],view[1][1],view[2][1]);
+    float scale = distance*0.0015f;
+    target += -right*dx*scale+up*dy*scale;
+    update();
+  }
+
   void reset(glm::vec3 t, float d, float y, float p){
     target = t; distance = d; yaw = y; pitch = p;
     update();

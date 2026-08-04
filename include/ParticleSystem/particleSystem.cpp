@@ -56,6 +56,8 @@ void ParticleSystem::handleCollision(uint64_t i, uint64_t j){
 
     ddot = vx*nx+vy*ny+vz*nz;
 
+    accumulateLoading(i,j);
+
     // computed per-pair from the actual colliding masses, so any
     //  number of species (Pd, Ni, H, ...) works without special-casing
     damping = ParticleSystem::damping(parameters[i*2+1],parameters[j*2+1]);
@@ -92,6 +94,8 @@ void ParticleSystem::handleCollision(uint64_t i, uint64_t j){
       ny = ry / d;
       nz = rz / d;
 
+      accumulateLoading(i,j);
+
       double taper = (dOuter-d)/(dOuter-rc);
       mag = 0.0;
 
@@ -120,6 +124,15 @@ void ParticleSystem::handleCollision(uint64_t i, uint64_t j){
       forces[j*3+1] -= fy;
       forces[j*3+2] -= fz;
     }
+  }
+}
+
+void ParticleSystem::accumulateLoading(uint64_t a, uint64_t b){
+  if (parameters[a*2+1] == mass && parameters[b*2+1] == hMass){
+    loadingAccumulator[a] += 1.0;
+  }
+  else if (parameters[b*2+1] == mass && parameters[a*2+1] == hMass){
+    loadingAccumulator[b] += 1.0;
   }
 }
 
@@ -159,7 +172,7 @@ double ParticleSystem::orderParameter(){
   int ns = 0;
 
   for (int i = 0; i < size(); i++){
-    if (parameters[i*2] == radius){
+    if (parameters[i*2+1] == mass){
       nl += 1;
     }
     else{
@@ -176,7 +189,7 @@ double ParticleSystem::orderParameter(){
     int s = 0;
     for (int i = 0; i < size(); i++){
       if (state[i*3+1] >= y && state[i*3+1] <= y+step){
-        if (parameters[i*2] == radius){
+        if (parameters[i*2+1] == mass){
           l += 1;
         }
         else{
@@ -225,6 +238,11 @@ void ParticleSystem::step(){
   clock_t tic = clock();
   resetLists();
   populateLists();
+
+  for (int i = 0; i < size(); i++){
+    loadingAccumulator[i] = 0.0;
+  }
+
   float setup = (clock()-tic)/float(CLOCKS_PER_SEC);
   tic = clock();
 
@@ -257,6 +275,26 @@ void ParticleSystem::step(){
 
   float col = (clock()-tic)/float(CLOCKS_PER_SEC);
   tic = clock();
+
+  // Pd hydride loading -> alpha/beta phase: fold this step's nearby-H
+  //  count into a smoothed reading, then relax each Pd particle's phase
+  //  state toward alpha or beta with a gap between the thresholds so it
+  //  doesn't just reversibly track loading (real absorption/desorption
+  //  hysteresis); the phase directly sets the particle's physical radius
+  for (int i = 0; i < size(); i++){
+    if (parameters[i*2+1] != mass){continue;}
+
+    hLoading[i] = hLoading[i]*loadingDecay + loadingAccumulator[i]*(1.0-loadingDecay);
+    double x = hLoading[i]/hLoadingSaturation;
+
+    double target = betaFraction[i];
+    if (x > loadingThresholdUp){target = 1.0;}
+    else if (x < loadingThresholdDown){target = 0.0;}
+
+    betaFraction[i] += (target-betaFraction[i])*phaseRelaxationRate;
+
+    parameters[i*2] = radius*(1.0+betaExpansion*betaFraction[i]);
+  }
 
   double cc = drag*dt/2.0;
 
@@ -449,6 +487,10 @@ void ParticleSystem::addParticle(
 
   charge.push_back(q);
 
+  hLoading.push_back(0.0);
+  loadingAccumulator.push_back(0.0);
+  betaFraction.push_back(0.0);
+
   forces.push_back(0.0);
   forces.push_back(0.0);
   forces.push_back(0.0);
@@ -472,6 +514,9 @@ void ParticleSystem::insertParticle(
   lastState.insert(lastState.begin()+3*idx, {x,y,z});
   parameters.insert(parameters.begin()+2*idx, {r,m});
   charge.insert(charge.begin()+idx, q);
+  hLoading.insert(hLoading.begin()+idx, 0.0);
+  loadingAccumulator.insert(loadingAccumulator.begin()+idx, 0.0);
+  betaFraction.insert(betaFraction.begin()+idx, 0.0);
   forces.insert(forces.begin()+3*idx, {0.0,0.0,0.0});
   velocities.insert(velocities.begin()+3*idx, {0.0,0.0,0.0});
 
@@ -512,6 +557,9 @@ void ParticleSystem::removeParticle(uint64_t i){
     );
 
     charge.erase(charge.begin()+i);
+    hLoading.erase(hLoading.begin()+i);
+    loadingAccumulator.erase(loadingAccumulator.begin()+i);
+    betaFraction.erase(betaFraction.begin()+i);
 
     forces.erase(
       forces.begin()+3*i,
